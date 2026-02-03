@@ -164,27 +164,110 @@ void Tensor::debug() const {
 }
 
 bool Tensor::isContiguous() const {
-    TO_BE_IMPLEMENTED();
+    const size_t ndim_ = ndim();
+    if (ndim_ <= 1) {
+        return true;  // 0维和1维tensor总是contiguous
+    }
+    
+    const auto& strides_ = strides();
+    const auto& shape_ = shape();
+    
+    // 检查最后一个维度的stride是否为1（contiguous tensor的要求）
+    if (strides_[ndim_ - 1] != 1) {
+        return false;
+    }
+    
+    // 从后往前检查：strides[i] == strides[i+1] * shape[i+1]
+    for (size_t i = ndim_ - 1; i > 0; i--) {
+        if (strides_[i - 1] != strides_[i] * static_cast<ptrdiff_t>(shape_[i])) {
+            return false;
+        }
+    }
+    
     return true;
 }
 
 tensor_t Tensor::permute(const std::vector<size_t> &order) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    const size_t ndim_ = ndim();
+    CHECK_ARGUMENT(order.size() == ndim_, "order size must be equal to ndim");
+    
+    // 验证order是否是有效的排列：检查索引范围和重复
+    std::vector<bool> used(ndim_, false);
+    for (size_t i = 0; i < ndim_; i++) {
+        CHECK_ARGUMENT(order[i] < ndim_, "order index out of range");
+        CHECK_ARGUMENT(!used[order[i]], "order contains duplicate indices");
+        used[order[i]] = true;
+    }
+    
+    // 缓存引用，避免重复调用
+    const auto& shape_ = shape();
+    const auto& strides_ = strides();
+    
+    // 重新排列shape和strides
+    std::vector<size_t> new_shape(ndim_);
+    std::vector<ptrdiff_t> new_strides(ndim_);
+    for (size_t i = 0; i < ndim_; i++) {
+        new_shape[i] = shape_[order[i]];
+        new_strides[i] = strides_[order[i]];
+    }
+    
+    return std::shared_ptr<Tensor>(new Tensor(TensorMeta{dtype(), new_shape, new_strides}, _storage, _offset));
 }
 
 tensor_t Tensor::view(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    CHECK_ARGUMENT(isContiguous(), "tensor is not contiguous");
+    
+    // 检查元素总数是否匹配
+    size_t total_elems = std::accumulate(shape.begin(), shape.end(), size_t(1), std::multiplies<size_t>());
+    CHECK_ARGUMENT(total_elems == numel(), "total elements must be equal to numel");
+
+    // 计算新的strides（从后往前，C-style row-major）
+    std::vector<ptrdiff_t> new_strides(shape.size());
+    ptrdiff_t stride = 1;
+    for (size_t i = shape.size(); i > 0; i--) {
+        new_strides[i - 1] = stride;
+        stride *= static_cast<ptrdiff_t>(shape[i - 1]);
+    }
+    
+    return std::shared_ptr<Tensor>(new Tensor(TensorMeta{dtype(), shape, new_strides}, _storage, _offset));
 }
 
 tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    const size_t ndim_ = ndim();
+    CHECK_ARGUMENT(dim < ndim_, "dimension index out of range");
+    
+    const auto& shape_ = shape();
+    const auto& strides_ = strides();
+    
+    // 验证范围
+    CHECK_ARGUMENT(start <= end && end <= shape_[dim], "invalid slice range");
+    
+    // 计算新的shape和offset
+    std::vector<size_t> new_shape = shape_;
+    new_shape[dim] = end - start;
+    
+    // 计算新的offset：需要加上 start * stride[dim] 的字节偏移
+    size_t element_offset = start * strides_[dim];
+    size_t new_offset = _offset + element_offset * elementSize();
+    
+    // strides保持不变
+    std::vector<ptrdiff_t> new_strides = strides_;
+    
+    return std::shared_ptr<Tensor>(
+        new Tensor(TensorMeta{dtype(), new_shape, new_strides}, _storage, new_offset)
+    );
 }
 
 void Tensor::load(const void *src_) {
-    TO_BE_IMPLEMENTED();
+    core::context().setDevice(this->deviceType(), this->deviceId());
+    
+    llaisysMemcpyKind_t kind = this->deviceType() == LLAISYS_DEVICE_CPU ? LLAISYS_MEMCPY_H2D : LLAISYS_MEMCPY_D2D;
+    core::context().runtime().api()->memcpy_sync(
+        this->data(),
+        src_,
+        this->numel() * this->elementSize(),
+        kind
+    );
 }
 
 tensor_t Tensor::contiguous() const {

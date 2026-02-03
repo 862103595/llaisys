@@ -6,7 +6,7 @@
 __C {
     struct LlaisysQwen2Meta {
         llaisysDataType_t dtype;
-        size_t nlayer, hs, nh, nkvh, dh, di, maxseq, voc;
+        size_t nlayer, hs, nh, nkvh, dh, di, im, maxseq, voc;
         float epsilon, theta;
         int64_t end_token;
     };
