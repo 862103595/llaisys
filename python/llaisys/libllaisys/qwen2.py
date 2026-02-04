@@ -70,3 +70,20 @@ def load_qwen2(lib):
         c_size_t,             # ntoken
     ]
     lib.llaisysQwen2ModelInfer.restype = c_int64
+
+    # llaisysQwen2ModelInferWithCache
+    lib.llaisysQwen2ModelInferWithCache.argtypes = [
+        LlaisysQwen2Model_t,  # model
+        POINTER(c_int64),     # token_ids
+        c_size_t,             # ntoken
+        c_size_t,             # pos_offset
+    ]
+    lib.llaisysQwen2ModelInferWithCache.restype = c_int64
+
+    # llaisysQwen2ModelResetCache
+    lib.llaisysQwen2ModelResetCache.argtypes = [LlaisysQwen2Model_t]
+    lib.llaisysQwen2ModelResetCache.restype = None
+
+    # llaisysQwen2ModelGetCacheLen
+    lib.llaisysQwen2ModelGetCacheLen.argtypes = [LlaisysQwen2Model_t]
+    lib.llaisysQwen2ModelGetCacheLen.restype = c_size_t

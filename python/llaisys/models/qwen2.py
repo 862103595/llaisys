@@ -117,6 +117,14 @@ class Qwen2:
                     data_ptr = tensor_data.data_ptr()
                     LIB_LLAISYS.tensorLoad(tensor_handle, ctypes.c_void_p(data_ptr))
 
+    def reset_cache(self):
+        """Reset KV cache."""
+        LIB_LLAISYS.llaisysQwen2ModelResetCache(self._model)
+
+    def get_cache_len(self) -> int:
+        """Get current KV cache length."""
+        return LIB_LLAISYS.llaisysQwen2ModelGetCacheLen(self._model)
+
     def generate(
         self,
         inputs: Sequence[int],
@@ -124,6 +132,7 @@ class Qwen2:
         top_k: int = 1,
         top_p: float = 0.8,
         temperature: float = 0.8,
+        use_cache: bool = True,
     ):
         """Generate tokens autoregressively.
 
@@ -133,6 +142,7 @@ class Qwen2:
             top_k: Top-k sampling (1 = greedy)
             top_p: Top-p (nucleus) sampling threshold
             temperature: Sampling temperature
+            use_cache: Whether to use KV cache for faster generation
 
         Returns:
             List of generated token IDs (including input tokens)
@@ -144,24 +154,54 @@ class Qwen2:
         tokens = list(inputs)
         end_token = self.meta.end_token
 
-        # Generate tokens one by one
-        for _ in range(max_new_tokens):
-            # Prepare token array for C API
-            token_array = (ctypes.c_int64 * len(tokens))(*tokens)
+        if use_cache:
+            # Reset cache for new generation
+            self.reset_cache()
 
-            # Run inference to get next token
-            next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+            # Prefill: process all input tokens at once
+            token_array = (ctypes.c_int64 * len(tokens))(*tokens)
+            next_token = LIB_LLAISYS.llaisysQwen2ModelInferWithCache(
                 self._model,
                 token_array,
                 len(tokens),
+                0,  # pos_offset = 0 for prefill
             )
-
-            # Append to sequence
             tokens.append(next_token)
 
-            # Check for end token
             if next_token == end_token:
-                break
+                return tokens
+
+            # Decode: generate one token at a time using cache
+            for _ in range(max_new_tokens - 1):
+                pos_offset = len(tokens) - 1  # Position of the new token
+                token_array = (ctypes.c_int64 * 1)(tokens[-1])
+
+                next_token = LIB_LLAISYS.llaisysQwen2ModelInferWithCache(
+                    self._model,
+                    token_array,
+                    1,  # Only process one token
+                    pos_offset,
+                )
+
+                tokens.append(next_token)
+
+                if next_token == end_token:
+                    break
+        else:
+            # No cache: recompute everything each time (slow)
+            for _ in range(max_new_tokens):
+                token_array = (ctypes.c_int64 * len(tokens))(*tokens)
+
+                next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+                    self._model,
+                    token_array,
+                    len(tokens),
+                )
+
+                tokens.append(next_token)
+
+                if next_token == end_token:
+                    break
 
         return tokens
 

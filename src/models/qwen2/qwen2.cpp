@@ -3,6 +3,7 @@
 #include <array>
 #include <vector>
 #include <cmath>
+#include <cstring>
 #include "llaisys.h"
 #include "../../llaisys/llaisys_tensor.hpp"
 #include "../../tensor/tensor.hpp"
@@ -151,6 +152,9 @@ Qwen2::Qwen2(const LlaisysQwen2Meta* meta,
             device_id
         );
     }
+    
+    // Initialize KV cache
+    initCache();
 }
 
 Qwen2::~Qwen2() {}
@@ -159,15 +163,116 @@ LlaisysQwen2Weights* Qwen2::getWeights() {
     return &weights_;
 }
 
-int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
+void Qwen2::initCache() {
+    kv_cache_.resize(meta_.nlayer);
+    for (size_t i = 0; i < meta_.nlayer; i++) {
+        kv_cache_[i].k_cache = nullptr;
+        kv_cache_[i].v_cache = nullptr;
+        kv_cache_[i].cached_len = 0;
+    }
+}
+
+void Qwen2::resetCache() {
+    for (size_t i = 0; i < meta_.nlayer; i++) {
+        kv_cache_[i].k_cache = nullptr;
+        kv_cache_[i].v_cache = nullptr;
+        kv_cache_[i].cached_len = 0;
+    }
+}
+
+std::pair<tensor_t, tensor_t> Qwen2::updateCache(size_t layer_idx, tensor_t new_k, tensor_t new_v) {
     const auto device_id = (device_ids_.empty()) ? 0 : device_ids_[0];
+    auto& cache = kv_cache_[layer_idx];
+    
+    size_t new_len = new_k->shape()[0];
+    size_t nkvh = meta_.nkvh;
+    size_t head_dim = meta_.di;
+    
+    if (cache.cached_len == 0) {
+        // First time: just store the new K/V
+        cache.k_cache = Tensor::create(
+            std::vector<size_t>{new_len, nkvh, head_dim},
+            meta_.dtype,
+            device_,
+            device_id
+        );
+        cache.v_cache = Tensor::create(
+            std::vector<size_t>{new_len, nkvh, head_dim},
+            meta_.dtype,
+            device_,
+            device_id
+        );
+        
+        // Copy data
+        size_t bytes = new_len * nkvh * head_dim * 2;  // BF16 = 2 bytes
+        std::memcpy(cache.k_cache->data(), new_k->data(), bytes);
+        std::memcpy(cache.v_cache->data(), new_v->data(), bytes);
+        cache.cached_len = new_len;
+        
+        return {cache.k_cache, cache.v_cache};
+    } else {
+        // Append new K/V to existing cache
+        size_t total_len = cache.cached_len + new_len;
+        
+        tensor_t new_k_cache = Tensor::create(
+            std::vector<size_t>{total_len, nkvh, head_dim},
+            meta_.dtype,
+            device_,
+            device_id
+        );
+        tensor_t new_v_cache = Tensor::create(
+            std::vector<size_t>{total_len, nkvh, head_dim},
+            meta_.dtype,
+            device_,
+            device_id
+        );
+        
+        size_t elem_size = 2;  // BF16 = 2 bytes
+        size_t cached_bytes = cache.cached_len * nkvh * head_dim * elem_size;
+        size_t new_bytes = new_len * nkvh * head_dim * elem_size;
+        
+        // Copy cached data
+        std::memcpy(new_k_cache->data(), cache.k_cache->data(), cached_bytes);
+        std::memcpy(new_v_cache->data(), cache.v_cache->data(), cached_bytes);
+        
+        // Copy new data
+        std::memcpy(
+            reinterpret_cast<uint8_t*>(new_k_cache->data()) + cached_bytes,
+            new_k->data(),
+            new_bytes
+        );
+        std::memcpy(
+            reinterpret_cast<uint8_t*>(new_v_cache->data()) + cached_bytes,
+            new_v->data(),
+            new_bytes
+        );
+        
+        // Update cache
+        cache.k_cache = new_k_cache;
+        cache.v_cache = new_v_cache;
+        cache.cached_len = total_len;
+        
+        return {cache.k_cache, cache.v_cache};
+    }
+}
+
+int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
+    // Reset cache for prefill mode
+    resetCache();
+    return inferWithCache(token_ids, ntoken, 0);
+}
+
+int64_t Qwen2::inferWithCache(int64_t* token_ids, size_t ntoken, size_t pos_offset) {
+    const auto device_id = (device_ids_.empty()) ? 0 : device_ids_[0];
+    
     tensor_t input_ids = Tensor::create(
         std::vector<size_t>{ntoken}, 
-        LLAISYS_DTYPE_I64,  // token IDs should be integers, not BF16
+        LLAISYS_DTYPE_I64,
         device_, 
         device_id
     );
     input_ids->load(token_ids);
+    
     tensor_t x = Tensor::create(
         std::vector<size_t>{ntoken, meta_.hs}, 
         meta_.dtype, 
@@ -175,6 +280,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
         device_id
     );
     ops::embedding(x, input_ids, weights_.in_embed->tensor);
+    
     for(size_t i = 0; i < meta_.nlayer; i++) {
         tensor_t x_norm = Tensor::create(
             std::vector<size_t>{ntoken, meta_.hs}, 
@@ -183,6 +289,8 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
             device_id
         );
         ops::rms_norm(x_norm, x, weights_.attn_norm_w[i]->tensor, meta_.epsilon);
+        
+        // Compute Q, K, V for new tokens only
         tensor_t q = Tensor::create(
             std::vector<size_t>{ntoken, meta_.nh * meta_.dh}, 
             meta_.dtype, 
@@ -190,6 +298,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
             device_id
         );
         ops::linear(q, x_norm, weights_.attn_q_w[i]->tensor, weights_.attn_q_b[i]->tensor);
+        
         tensor_t k = Tensor::create(
             std::vector<size_t>{ntoken, meta_.nkvh * meta_.di}, 
             meta_.dtype, 
@@ -197,6 +306,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
             device_id
         );
         ops::linear(k, x_norm, weights_.attn_k_w[i]->tensor, weights_.attn_k_b[i]->tensor);
+        
         tensor_t v = Tensor::create(
             std::vector<size_t>{ntoken, meta_.nkvh * meta_.di}, 
             meta_.dtype, 
@@ -205,6 +315,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
         );
         ops::linear(v, x_norm, weights_.attn_v_w[i]->tensor, weights_.attn_v_b[i]->tensor);
 
+        // Position IDs for new tokens (with offset)
         tensor_t pos_ids = Tensor::create(
             std::vector<size_t>{ntoken}, 
             LLAISYS_DTYPE_I64, 
@@ -213,7 +324,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
         );
         std::vector<int64_t> pos_ids_vec(ntoken);
         for (size_t j = 0; j < ntoken; j++) {
-            pos_ids_vec[j] = j;
+            pos_ids_vec[j] = static_cast<int64_t>(pos_offset + j);
         }
         pos_ids->load(pos_ids_vec.data());
         
@@ -222,9 +333,14 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
         tensor_t k_3d = k->view(std::vector<size_t>{ntoken, meta_.nkvh, meta_.di});
         tensor_t v_3d = v->view(std::vector<size_t>{ntoken, meta_.nkvh, meta_.di});
         
+        // Apply RoPE to new tokens
         ops::rope(q_3d, q_3d, pos_ids, meta_.theta);
         ops::rope(k_3d, k_3d, pos_ids, meta_.theta);
+        
+        // Update KV cache and get full K/V
+        auto [full_k, full_v] = updateCache(i, k_3d, v_3d);
     
+        // Self-attention with full K/V cache
         tensor_t attn_val = Tensor::create(
             std::vector<size_t>{ntoken, meta_.nh, meta_.dh}, 
             meta_.dtype, 
@@ -232,7 +348,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
             device_id
         );
         float scale = 1.0f / std::sqrt(static_cast<float>(meta_.dh));
-        ops::self_attention(attn_val, q_3d, k_3d, v_3d, scale);
+        ops::self_attention(attn_val, q_3d, full_k, full_v, scale);
         
         // Reshape attn_val back to 2D: [ntoken, nh, dh] -> [ntoken, nh*dh]
         tensor_t attn_val_2d = attn_val->view(std::vector<size_t>{ntoken, meta_.nh * meta_.dh});
@@ -286,6 +402,7 @@ int64_t Qwen2::infer(int64_t* token_ids, size_t ntoken) {
         ops::linear(x_mlp, swiglu_out, weights_.mlp_down_w[i]->tensor, nullptr);
         ops::add(x, x, x_mlp);
     }
+    
     tensor_t output_norm = Tensor::create(
         std::vector<size_t>{ntoken, meta_.hs}, 
         meta_.dtype, 

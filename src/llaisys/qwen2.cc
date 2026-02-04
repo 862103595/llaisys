@@ -35,4 +35,22 @@ int64_t llaisysQwen2ModelInfer(struct LlaisysQwen2Model* model,
     return model->model->infer(token_ids, ntoken);
 }
 
+int64_t llaisysQwen2ModelInferWithCache(struct LlaisysQwen2Model* model,
+                                        int64_t* token_ids,
+                                        size_t ntoken,
+                                        size_t pos_offset) {
+    if (model == nullptr || model->model == nullptr) return -1;
+    return model->model->inferWithCache(token_ids, ntoken, pos_offset);
+}
+
+void llaisysQwen2ModelResetCache(struct LlaisysQwen2Model* model) {
+    if (model == nullptr || model->model == nullptr) return;
+    model->model->resetCache();
+}
+
+size_t llaisysQwen2ModelGetCacheLen(struct LlaisysQwen2Model* model) {
+    if (model == nullptr || model->model == nullptr) return 0;
+    return model->model->getCacheLen();
+}
+
 }

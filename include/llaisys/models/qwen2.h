@@ -38,5 +38,14 @@ __C {
     __export struct LlaisysQwen2Weights *llaisysQwen2ModelWeights(struct LlaisysQwen2Model * model);
 
     __export int64_t llaisysQwen2ModelInfer(struct LlaisysQwen2Model * model, int64_t * token_ids, size_t ntoken);
+
+    // Inference with KV cache support
+    __export int64_t llaisysQwen2ModelInferWithCache(struct LlaisysQwen2Model * model, int64_t * token_ids, size_t ntoken, size_t pos_offset);
+
+    // Reset KV cache
+    __export void llaisysQwen2ModelResetCache(struct LlaisysQwen2Model * model);
+
+    // Get current cache length
+    __export size_t llaisysQwen2ModelGetCacheLen(struct LlaisysQwen2Model * model);
 }
 #endif // LLAISYS_MODELS_QWEN2_H
