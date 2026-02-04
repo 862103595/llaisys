@@ -22,9 +22,10 @@ void rope_cpu(T *out, const T *in, const int64_t *pos_ids, size_t seq_len, size_
             // Apply RoPE for each dimension pair
             for (size_t j = 0; j < half_dim; j++) {
                 // Compute angle: phi = pos / (theta^(2j/head_dim))
+                // Use division instead of negative exponent to match PyTorch precision
                 float exponent = 2.0f * static_cast<float>(j) / static_cast<float>(head_dim);
-                float inv_freq = std::pow(theta, -exponent);
-                float angle = pos_f * inv_freq;
+                float freq = std::pow(theta, exponent);
+                float angle = pos_f / freq;
                 
                 float cos_val = std::cos(angle);
                 float sin_val = std::sin(angle);

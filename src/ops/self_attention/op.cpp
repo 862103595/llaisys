@@ -19,8 +19,9 @@ void self_attention_cpu(T *attn_val, const T *q, const T *k, const T *v,
     // Q: [qlen, nh, hd] -> view as [nh, qlen, hd]
     // K: [kvlen, nkvh, hd] -> view as [nkvh, kvlen, hd], then repeat to [nh, kvlen, hd]
     // attn_weight: [nh, qlen, kvlen]
+    size_t heads_per_group = nh / nkvh;
     for (size_t h = 0; h < nh; h++) {
-        size_t kvh = h % nkvh;  // Repeat k/v heads
+        size_t kvh = h / heads_per_group;  // GQA: repeat_interleave mapping
         for (size_t i = 0; i < qlen; i++) {
             for (size_t j = 0; j < kvlen; j++) {
                 float sum = 0.0f;
@@ -78,7 +79,7 @@ void self_attention_cpu(T *attn_val, const T *q, const T *k, const T *v,
     // V: [kvlen, nkvh, hd] -> view as [nkvh, kvlen, hd], then repeat to [nh, kvlen, hd]
     // attn_val: [qlen, nh, hd]
     for (size_t h = 0; h < nh; h++) {
-        size_t kvh = h % nkvh;  // Repeat v heads
+        size_t kvh = h / heads_per_group;  // GQA: repeat_interleave mapping
         for (size_t i = 0; i < qlen; i++) {
             for (size_t d = 0; d < hd; d++) {
                 float sum = 0.0f;

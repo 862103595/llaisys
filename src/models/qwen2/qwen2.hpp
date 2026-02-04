@@ -1,5 +1,6 @@
 #pragma once
 
+#include <vector>
 #include "llaisys/models/qwen2.h"
 #include "llaisys/tensor.h"
 
